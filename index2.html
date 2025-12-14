@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>Monitoring Suhu & Kelembaban - Realtime</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; padding:20px; max-width:900px; margin: 0 auto; background-color: #f4f4f9; }
+    .card { border-radius:8px; padding:16px; box-shadow:0 2px 6px rgba(0,0,0,0.1); background: white; margin-bottom: 20px; }
+    .card.small-card { max-width: 480px; }
+    .card.large { width: 100%; box-sizing: border-box; }
+    
+    .value { font-size:2.2rem; font-weight:700; color: #2c3e50; }
+    .small { color:#666; font-size: 0.9rem; }
+    #log { white-space: pre-wrap; font-family: monospace; margin-top:12px; max-height:100px; overflow:auto; background:#eee; padding:8px; border-radius:6px; font-size: 0.75rem; color: #333;}
+    
+    button { margin-right:6px; padding:8px 12px; cursor: pointer; border: none; border-radius: 4px; background: #007bff; color: white; transition: 0.2s;}
+    button:hover { background: #0056b3; }
+    button#btnClear { background: #6c757d; }
+    
+    /* --- CSS VISUAL BEEP --- */
+    .alert-on { color: white; background: #dc3545; padding:4px 8px; border-radius:6px; font-weight: bold;}
+    .alert-off { color: #333; background: #e9ecef; padding:4px 8px; border-radius:6px; }
+
+    .status-aman { color: green; font-weight: bold; }
+    .status-warning { color: #d35400; font-weight: bold; } /* Oranye */
+    .status-danger { color: red; font-weight: bold; }       /* Merah */
+
+    /* Efek Lampu Web Menyala Merah (Saat Beep Bunyi) */
+    .lampu-beep-on {
+        background-color: red;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 4px;
+        box-shadow: 0 0 15px rgba(255, 0, 0, 0.8);
+        transition: none; /* Instan */
+    }
+  </style>
+</head>
+<body>
+  <h1>Realtime: Suhu & Kelembaban</h1>
+
+  <div class="card small-card">
+    <div><span class="small">NIM:</span> <span id="nim" style="font-weight:bold">-</span></div>
+
+    <div style="margin-top:10px; display: flex; gap: 20px;">
+        <div>
+            <div class="small">Suhu (°C)</div>
+            <div id="temp" class="value">-</div>
+        </div>
+        <div>
+            <div class="small">Kelembaban (%)</div>
+            <div id="hum" class="value">-</div>
+        </div>
+    </div>
+
+    <div style="margin-top:15px; border-top: 1px solid #eee; padding-top: 10px;">
+        <div class="small">Status koneksi: <span id="status" style="font-weight:bold; color: orange;">Menghubungkan...</span></div>
+        <div class="small" style="margin-top:4px">Kondisi : <span id="taskStatus" class="status-aman">-</span></div>
+    </div>
+
+    <div style="margin-top:15px">
+      <button id="btnOn">Lampu ON</button>
+      <button id="btnOff">Lampu OFF</button>
+      <button id="btnToggle">Toggle</button>
+      
+      <div class="small" style="margin-top:8px">
+          Status Lampu Web: <span id="ledStatus" style="font-weight:bold; transition: all 0.2s;">-</span>
+      </div>
+      
+      <div style="margin-top:8px">
+        Alert (>30°C): <span id="alertStatus" class="alert-off">OFF</span>
+      </div>
+      
+    </div>
+  </div>
+
+  <div class="card large">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px;">
+      <div>
+        <div style="font-weight: bold; font-size: 1.1rem;">Grafik Live Data</div>
+        <div class="small">Update hanya saat data diterima.</div>
+      </div>
+      <button id="btnClear">Reset Grafik</button>
+    </div>
+    <div style="position: relative; height: 300px; width: 100%;">
+        <canvas id="chartCombined"></canvas>
+    </div>
+  </div>
+
+  <h3>Log Sistem</h3>
+  <div id="log">Menunggu pesan...</div>
+
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+    // --- KONFIGURASI ---
+    const NIM = "G.231.23.0036"; 
+    const wsUrl = "ws://x2.revolusi-it.com:9001";
+    
+    // --- AUDIO CONTEXT ---
+    let audioCtx;
+    try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch(e) { console.log("Audio not supported"); }
+
+    // Fungsi: Bunyi Beep + Lampu Web Kedip
+    function triggerBeep(count) {
+        if (!audioCtx) return;
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(e=>console.log(e));
+        
+        let i = 0;
+        function playTone() {
+            if (i >= count) {
+                els.led.className = ""; 
+                return; 
+            }
+
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            oscillator.type = 'square'; 
+            oscillator.frequency.value = 800; 
+            oscillator.start();
+
+            // Visual Lampu NYALA MERAH
+            els.led.className = "lampu-beep-on"; 
+            
+            setTimeout(() => {
+                oscillator.stop();
+                els.led.className = ""; 
+                i++;
+                if (i < count) setTimeout(playTone, 150); 
+            }, 150);
+        }
+        playTone();
+    }
+
+    // --- SETUP CHART ---
+    const ctx = document.getElementById('chartCombined').getContext('2d');
+    const myChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [], 
+            datasets: [
+                {
+                    label: 'Suhu (°C)', data: [], borderColor: 'rgb(255, 99, 132)', backgroundColor: 'rgba(255, 99, 132, 0.1)', borderWidth: 2, pointRadius: 2, tension: 0.1, fill: true
+                },
+                {
+                    label: 'Kelembaban (%)', data: [], borderColor: 'rgb(54, 162, 235)', backgroundColor: 'rgba(54, 162, 235, 0.1)', borderWidth: 2, pointRadius: 2, tension: 0.1, fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: false, 
+            interaction: { mode: 'index', intersect: false },
+            scales: { x: { display: true, ticks: { maxTicksLimit: 10 } }, y: { beginAtZero: false } }
+        }
+    });
+
+    // --- MQTT LOGIC ---
+    const options = {
+      username: "usm",
+      password: "usmjaya25",
+      keepalive: 60,
+      reconnectPeriod: 4000,
+      clientId: NIM + "-" + Math.floor(Math.random() * 1000)
+    };
+
+    const topic = "iot/" + NIM;
+    const ledTopic = topic + "/led";
+    const alertTopic = topic + "/alert";
+
+    const els = {
+        temp: document.getElementById("temp"),
+        hum: document.getElementById("hum"),
+        nim: document.getElementById("nim"),
+        status: document.getElementById("status"),
+        led: document.getElementById("ledStatus"),
+        alert: document.getElementById("alertStatus"),
+        taskStat: document.getElementById("taskStatus"),
+        log: document.getElementById("log")
+    };
+
+    let isConnected = false;
+    const client = mqtt.connect(wsUrl, options);
+
+    client.on("connect", function () {
+      isConnected = true;
+      els.status.innerText = "Terhubung";
+      els.status.style.color = "green";
+      client.subscribe(topic);
+      client.subscribe(ledTopic);
+      client.subscribe(alertTopic);
+    });
+
+    client.on("reconnect", () => {
+        els.status.innerText = "Reconnecting...";
+        els.status.style.color = "red";
+        isConnected = false;
+    });
+
+    client.on("message", function (top, message) {
+      const txt = message.toString();
+
+      if (top === ledTopic) {
+        if(txt.includes("ON")) els.led.innerText = "ON";
+        else if(txt.includes("OFF")) els.led.innerText = "OFF";
+        return;
+      }
+
+      if (top === alertTopic) {
+        if(txt.includes("1") || txt.includes("true") || txt.includes("ON")) {
+            els.alert.innerText = "BAHAYA (ON)";
+            els.alert.className = "alert-on";
+        } else {
+            els.alert.innerText = "AMAN (OFF)";
+            els.alert.className = "alert-off";
+        }
+        return;
+      }
+
+      try {
+        const obj = JSON.parse(txt);
+        
+        // --- 1. UPDATE ANGKA & CHART (PRIORITAS UTAMA) ---
+        if (obj.nim) els.nim.innerText = obj.nim;
+        const t = parseFloat(obj.t);
+        const h = parseFloat(obj.h);
+
+        if (!isNaN(t)) els.temp.innerText = t.toFixed(1);
+        if (!isNaN(h)) els.hum.innerText = h.toFixed(1);
+        
+        // PENTING: Update Grafik DULUAN sebelum ada kemungkinan error lain
+        if (isConnected && !isNaN(t) && !isNaN(h)) {
+            updateChart(t, h);
+        }
+
+        // --- 2. LOGIKA TUGAS (BEEP & VISUAL) ---
+        let logStatus = "Normal";
+        if (!isNaN(t)) {
+             try {
+                 if (t < 29) {
+                    els.taskStat.innerText = "Aman (< 29)";
+                    els.taskStat.className = "status-aman";
+                 } 
+                 else if (t > 29 && t < 30) {
+                    els.taskStat.innerText = "Warning (Beep 1x)";
+                    els.taskStat.className = "status-warning";
+                    triggerBeep(1);
+                    logStatus = "Beep 1x";
+                 } 
+                 else if (t >= 30 && t <= 31) {
+                    els.taskStat.innerText = "Waspada (Beep 2x)";
+                    els.taskStat.className = "status-warning";
+                    triggerBeep(2);
+                    logStatus = "Beep 2x";
+                 } 
+                 else if (t > 31) {
+                    els.taskStat.innerText = "BAHAYA (Beep 3x)";
+                    els.taskStat.className = "status-danger";
+                    triggerBeep(3);
+                    logStatus = "Beep 3x";
+                 }
+             } catch(audioErr) {
+                 console.log("Audio Error: " + audioErr);
+             }
+        }
+
+        // --- 3. UPDATE LOG ---
+        if (!isNaN(t) && !isNaN(h)) {
+            appendLog(`Mengirim ke MQTT: ${txt}`);
+            appendLog(`Status Tugas: ${logStatus}`);
+            appendLog(`Status: Terkirim! (Diterima Web)`);
+            appendLog(`-----------------------`);
+        }
+
+      } catch(e) {
+        // Silent error
+      }
+    });
+
+    function updateChart(temp, hum) {
+        const now = new Date();
+        const timeLabel = now.toLocaleTimeString('id-ID', { hour12: false });
+        myChart.data.labels.push(timeLabel);
+        myChart.data.datasets[0].data.push(temp);
+        myChart.data.datasets[1].data.push(hum);
+
+        if (myChart.data.labels.length > 20) {
+            myChart.data.labels.shift();
+            myChart.data.datasets[0].data.shift();
+            myChart.data.datasets[1].data.shift();
+        }
+        myChart.update('none'); 
+    }
+
+    function appendLog(s) {
+      const t = new Date().toLocaleTimeString();
+      els.log.innerText = `[${t}] ${s}\n` + els.log.innerText;
+      if (els.log.innerText.length > 3000) els.log.innerText = els.log.innerText.substring(0, 3000);
+    }
+
+    const activateAudio = () => { if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); };
+
+    document.getElementById("btnOn").onclick = () => { client.publish(ledTopic, "ON"); activateAudio(); };
+    document.getElementById("btnOff").onclick = () => { client.publish(ledTopic, "OFF"); activateAudio(); };
+    document.getElementById("btnToggle").onclick = () => { client.publish(ledTopic, "TOGGLE"); activateAudio(); };
+    
+    document.getElementById("btnClear").onclick = () => {
+        myChart.data.labels = [];
+        myChart.data.datasets.forEach(dataset => dataset.data = []);
+        myChart.update();
+        els.log.innerText = "Log dibersihkan...\n";
+    };
+  </script>
+</body>
+</html>
